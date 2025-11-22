@@ -1,11 +1,21 @@
-## **MiL for imbalanced learning-hard problems**
-### **Dataset: Ovarian: high-dimensional extremely imbalanced data**
-#####RNA_seq data with 20531 genes across 266 samples, where 4 samples are 'solid ovarian cancer samples'
+from google.colab import drive
+import os
 
-### **Naive MiL is employed for this dataset**
-##### Authors: Anonymous (currently)
-##### (c) all right reserved
+def mountGoogleDrive(myFolder):
+  root='/content/drive'
+  drive.mount(root, force_remount=True)
+  dest_folder=root + '/My Drive'+myFolder
+  os.chdir(dest_folder)
 
+  curr_path=os.getcwd()
+  if (len(curr_path)>0):
+    print('Current path: ', os.getcwd())
+    return curr_path
+  else:
+    raise Exception('\n can not mount the Google drive\n')
+
+myFolder = '/Ovarian/'
+curr_path=mountGoogleDrive(myFolder)
 
 ## ignore warnings
 
@@ -39,52 +49,235 @@ from sklearn.manifold import TSNE
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-#######################################################################################
-# Function to perform reproducible learning (classification) using the SVM
-# for a single test entry or a small batch, where training data is the traininlet
-# for each test entry or batch.
+
+# ===== GPU-aware SVM backend selection =====
+import numpy as np
+
+def _try_import(mod):
+    try:
+        return __import__(mod)
+    except Exception:
+        return None
+
+def _has_cuml():
+    return _try_import("cuml") is not None
+
+def _has_thundersvm():
+    return _try_import("thundersvm") is not None
+
+def _has_torch_gpu():
+    torch = _try_import("torch")
+    return (torch is not None) and torch.cuda.is_available()
+
+def _seed_everything(seed: int = 42):
+    np.random.seed(seed)
+    torch = _try_import("torch")
+    if torch is not None:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+def _ensure_finite_np(a):
+    import numpy as _np
+    a = _np.asarray(a)
+    # replace NaN/Inf with 0
+    return _np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+
+def _standardize_gpu_cpu(X_tr, X_te):
+    # Prefer Torch scaling with variance clamp
+    torch = _try_import("torch")
+    if torch is not None and torch.cuda.is_available():
+        import torch as _torch
+        dev = _torch.device("cuda")
+        Xtr_t = _torch.tensor(np.asarray(X_tr, dtype=np.float32), device=dev)
+        Xte_t = _torch.tensor(np.asarray(X_te, dtype=np.float32), device=dev)
+        mean = Xtr_t.mean(0, keepdim=True)
+        std = Xtr_t.std(0, keepdim=True).clamp_min(1e-8)
+        Xtr_t = (Xtr_t - mean) / std
+        Xte_t = (Xte_t - mean) / std
+        return Xtr_t, Xte_t
+    # Fallback to sklearn scaler on CPU, then sanitize
+    from sklearn.preprocessing import StandardScaler
+    sk = StandardScaler(with_mean=True, with_std=True)
+    Xtr = sk.fit_transform(X_tr)
+    Xte = sk.transform(X_te)
+    Xtr = _ensure_finite_np(Xtr)
+    Xte = _ensure_finite_np(Xte)
+    return Xtr, Xte
+
+def _train_eval_cuml(X_tr, y_tr, X_te, kernel, C, gamma, max_iter, verbose):
+    from cuml.svm import SVC as CUSVC
+    from cuml.svm import LinearSVC as CULinearSVC
+    if kernel == "linear":
+        model = CULinearSVC(C=C, max_iter=max_iter, verbose=verbose)
+    else:
+        model = CUSVC(C=C, kernel=kernel, gamma=gamma, max_iter=max_iter, probability=False, verbose=verbose)
+    model.fit(X_tr, y_tr)
+    y_pred = model.predict(X_te)
+    try:
+        import cupy as cp
+        if hasattr(y_pred, "__cuda_array_interface__"):
+            y_pred = cp.asnumpy(y_pred)
+    except Exception:
+        pass
+    return y_pred
+
+def _train_eval_thundersvm(X_tr, y_tr, X_te, kernel, C, gamma, max_iter, verbose):
+    from thundersvm import SVC as TSSVC
+    model = TSSVC(C=C, kernel=kernel, gamma=gamma, max_iter=max_iter, verbose=verbose)
+    model.fit(X_tr, y_tr)
+    return model.predict(X_te)
+
+def _train_eval_torch_linear(X_tr_t, y_tr, X_te_t, C, epochs, batch_size, lr):
+    import torch
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    y_tr_np = np.asarray(y_tr, dtype=np.int64)
+    y_tr_t = torch.tensor(y_tr_np * 2 - 1, dtype=torch.float32, device=dev).view(-1, 1)
+    if not isinstance(X_tr_t, torch.Tensor):
+        X_tr_t = torch.tensor(np.asarray(X_tr_t, dtype=np.float32), device=dev)
+    if not isinstance(X_te_t, torch.Tensor):
+        X_te_t = torch.tensor(np.asarray(X_te_t, dtype=np.float32), device=dev)
+    n_features = X_tr_t.shape[1]
+    model = torch.nn.Linear(n_features, 1, bias=True).to(dev)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    n = X_tr_t.shape[0]
+    def hinge_loss(m, xb, yb):
+        scores = m(xb)
+        margins = 1.0 - yb * scores
+        return torch.clamp(margins, min=0.0).mean()
+    model.train()
+    for _ in range(epochs):
+        perm = torch.randperm(n, device=dev)
+        for i in range(0, n, batch_size):
+            idx = perm[i:i+batch_size]
+            xb, yb = X_tr_t[idx], y_tr_t[idx]
+            opt.zero_grad()
+            h = hinge_loss(model, xb, yb)
+            w = next(p for name, p in model.named_parameters() if name == "weight")
+            reg = 0.5 * (w**2).sum()
+            loss = C * h + reg
+            loss.backward()
+            opt.step()
+    model.eval()
+    with torch.no_grad():
+        scores = model(X_te_t).squeeze(1)
+        y_pred = (scores > 0).long().cpu().numpy()
+    return y_pred
+
+def _train_eval_sklearn_cpu(X_tr, y_tr, X_te, kernel, C, gamma, max_iter):
+    from sklearn.svm import SVC, LinearSVC
+    if kernel == "linear":
+        model = LinearSVC(C=C, max_iter=max_iter, dual=True)
+    else:
+        model = SVC(C=C, kernel=kernel, gamma=gamma, max_iter=max_iter, probability=False)
+    model.fit(X_tr, y_tr)
+    return model.predict(X_te)
 
 
-# To acheive the reproducible learning results: support vector machines should be used
-# rather than the others
-######################################################################################
-
-
-def doReproducibleLearning(X_train, y_train, X_test):
+def doReproducibleLearning(
+    X_train, y_train, X_test,
+    *,
+    backend: str = "auto",
+    kernel: str = "rbf",
+    C: float = 10.0,
+    gamma = 1e-2,
+    tol: float = 1e-4,
+    max_iter: int = 2000,
+    seed: int = 42,
+    verbose: bool = False,
+    torch_epochs: int = 10,
+    torch_batch_size: int = 8192,
+    torch_lr: float = 1e-2
+):
     """
-    Train an SVM classifier on the training data and predict the labels for the test data for reproducible learning.
-
-    Parameters:
-    - X_train: array-like or pd.DataFrame
-        Feature matrix for the training data
-
-    - y_train: array-like or pd.Series
-        Labels for the training data
-
-    - X_test: array-like or pd.DataFrame
-        Feature matrix for the test data
-
-    Returns:
-    - y_test: array-like
-        Predicted labels for the test data
+    Train SVM with multiple backends:
+      - 'cuml'          GPU kernel SVM
+      - 'thundersvm'    GPU kernel SVM
+      - 'torch'         GPU linear SVM (hinge-loss)
+      - 'sklearn'       CPU fallback
+      - 'auto'          Prefer cuml > thundersvm > torch > sklearn
+    Returns predicted labels for X_test.
     """
+    _seed_everything(seed)
 
-    # SVM parameters
-    kernel = 'rbf'
-    C = 10.0
-    gamma = 1e-2
-    tol = 1e-4
+    # Resolve backend
+    if backend == "auto":
+        if _has_cuml():
+            backend_use = "cuml"
+        elif _has_thundersvm():
+            backend_use = "thundersvm"
+        elif _has_torch_gpu():
+            backend_use = "torch"
+        else:
+            backend_use = "sklearn"
+    else:
+        backend_use = backend
 
-    # Get the configured SVM classifier
-    clf = SVC(kernel=kernel, C=C, gamma=gamma, tol=tol)
+    # Standardize (GPU-first)
+    X_tr_std, X_te_std = _standardize_gpu_cpu(X_train, X_test)
 
-    # Fit the classifier on the training data
-    clf.fit(X_train, y_train)
+    # Ensure labels are numpy ints
+    import numpy as _np
+    y_tr_np = _np.asarray(y_train, dtype=_np.int32)
 
-    # Predict the labels for the test data
-    y_test = clf.predict(X_test)
+    # cuML path
+    if backend_use == "cuml":
+        y_pred = _train_eval_cuml(X_tr_std, y_tr_np, X_te_std, kernel, C, gamma, max_iter, verbose)
+        if _np.isnan(_np.asarray(y_pred)).any():
+            print("[WARN] NaN detected in y_pred from cuML. Falling back to sklearn backend.")
+            try:
+                import torch
+                if isinstance(X_tr_std, torch.Tensor):
+                    X_tr_cpu = X_tr_std.detach().cpu().numpy()
+                    X_te_cpu = X_te_std.detach().cpu().numpy()
+                else:
+                    X_tr_cpu, X_te_cpu = X_tr_std, X_te_std
+            except Exception:
+                X_tr_cpu, X_te_cpu = X_tr_std, X_te_std
+            y_pred = _train_eval_sklearn_cpu(X_tr_cpu, y_tr_np, X_te_cpu, kernel, C, gamma, max_iter)
+        return y_pred
 
-    return y_test
+    # ThunderSVM path
+    elif backend_use == "thundersvm":
+        y_pred = _train_eval_thundersvm(X_tr_std, y_tr_np, X_te_std, kernel, C, gamma, max_iter, verbose)
+        if _np.isnan(_np.asarray(y_pred)).any():
+            print("[WARN] NaN detected in y_pred from ThunderSVM. Falling back to sklearn backend.")
+            y_pred = _train_eval_sklearn_cpu(X_tr_std, y_tr_np, X_te_std, kernel, C, gamma, max_iter)
+        return y_pred
+
+    # Torch-linear path
+    elif backend_use == "torch":
+        if kernel != "linear" and verbose:
+            print("[WARN] torch backend only supports linear; switching to linear.")
+        y_pred = _train_eval_torch_linear(X_tr_std, y_tr_np, X_te_std, C, torch_epochs, torch_batch_size, torch_lr)
+        if _np.isnan(_np.asarray(y_pred)).any():
+            print("[WARN] NaN detected in y_pred from torch-linear. Falling back to sklearn backend.")
+            try:
+                import torch
+                if isinstance(X_tr_std, torch.Tensor):
+                    X_tr_cpu = X_tr_std.detach().cpu().numpy()
+                    X_te_cpu = X_te_std.detach().cpu().numpy()
+                else:
+                    X_tr_cpu, X_te_cpu = X_tr_std, X_te_std
+            except Exception:
+                X_tr_cpu, X_te_cpu = X_tr_std, X_te_std
+            y_pred = _train_eval_sklearn_cpu(X_tr_cpu, y_tr_np, X_te_cpu, "linear", C, gamma, max_iter)
+        return y_pred
+
+    # sklearn path
+    elif backend_use == "sklearn":
+        y_pred = _train_eval_sklearn_cpu(X_tr_std, y_tr_np, X_te_std, kernel, C, gamma, max_iter)
+        if _np.isnan(_np.asarray(y_pred)).any():
+            print("[ERROR] y_pred contains NaN in sklearn path. Replacing NaNs with majority class.")
+            y_pred = _np.asarray(y_pred)
+            vals, counts = _np.unique(y_tr_np, return_counts=True)
+            majority = vals[counts.argmax()]
+            mask = _np.isnan(y_pred)
+            y_pred[mask] = majority
+        return y_pred
+
+    else:
+        raise ValueError(f"Unknown backend: {backend_use}")
 
 def doNormalization(X_train, X_test, normalization_bit):
     """
