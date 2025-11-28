@@ -43,6 +43,13 @@ iclr26-anon-code
 │   ├── ovarian_protonet_maml.py
 │   └── savee_protonet_maml.py
 │
+├── Related_Codes
+│   ├── casia_lhi.py
+│   ├── covid_lhi.py
+│   ├── irmas_lhi.py
+│   ├── ovarian_lhi.py
+│   └── savee_lhi.py
+│
 ├── SC-let (for CIFAR100)
 │   ├── demosclet.py
 │   └── SCletReadme.MD
@@ -108,7 +115,12 @@ These are not part of the primary method but included for completeness.
 
 ---
 
-### **5. SC-let/**
+### **5. Related_Codes/**
+Additional scripts including Learning Hard Index (LHI) computation.
+
+---
+
+### **6. SC-let/**
 This module includes the SC-let implementation for CIFAR100:
 
 - **SC-let: Shared-Backbone SVM-micro-CNN-lets with NTC**
