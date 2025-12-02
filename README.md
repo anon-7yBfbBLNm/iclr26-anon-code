@@ -36,6 +36,13 @@ iclr26-anon-code
 │   ├── ovarian_mil.py
 │   └── savee_mil.py
 │
+├── Other_Peer_Models
+│   ├── demoLNN.py
+│   ├── demopretrainingmodel4irmas.py
+│   ├── demoPretrainingModel4ovarian.py
+│   ├── demoSAM4covid.py
+│   └── README.md
+│
 ├── ProtoNet_MAML
 │   ├── casia_protonet_maml.py
 │   ├── covid_protonet_maml.py
@@ -101,7 +108,18 @@ This version mirrors the CPU implementation but is optimized for faster executio
 
 ---
 
-### **4. ProtoNet_MAML/**
+### **4. Other_Peer_Models/**
+This directory contains additional peer model baselines used for comparison across several learning-hard datasets.
+
+- Liquid Neural Networks (LNN) applied to IRMAS
+- Autoencoder-based pretraining + supervised fine-tuning for IRMAS and OVARIAN
+- Sharpness-Aware Minimization (SAM) baseline for COVID
+
+For detailed descriptions of each script and model, please refer to the README in this directory.
+
+---
+
+### **5. ProtoNet_MAML/**
 This folder includes supplementary experiments:
 
 - Prototypical Network
@@ -115,12 +133,12 @@ These are not part of the primary method but included for completeness.
 
 ---
 
-### **5. Related_Codes/**
+### **6. Related_Codes/**
 Additional scripts including Learning Hard Index (LHI) computation.
 
 ---
 
-### **6. SC-let/**
+### **7. SC-let_CIFAR100/**
 This module includes the SC-let implementation for CIFAR100:
 
 - **SC-let: Shared-Backbone SVM-micro-CNN-lets with NTC**
