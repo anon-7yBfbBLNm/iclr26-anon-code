@@ -7,7 +7,7 @@ This repository contains the implementation and datasets used for our ICML 2026 
 ## Repository Structure
 
 ```
-iclr26-anon-code
+icml26-anon-code
 ├── Datasets
 │   ├── CASIA
 │   │   └── CASIA-1200.csv
