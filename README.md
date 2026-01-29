@@ -1,6 +1,6 @@
-# Anonymous ICLR 2026 Submission Code
+# Anonymous ICML 2026 Submission Code
 
-This repository contains the implementation and datasets used for our ICLR 2026 anonymous submission.
+This repository contains the implementation and datasets used for our ICML 2026 anonymous submission.
 
 ---
 

@@ -1,4 +1,3 @@
-## **MiL for imbalanced learning-hard problems**
 ### **Dataset: Ovarian: high-dimensional extremely imbalanced data**
 #####RNA_seq data with 20531 genes across 266 samples, where 4 samples are 'solid ovarian cancer samples'
 
