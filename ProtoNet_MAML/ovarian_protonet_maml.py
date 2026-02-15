@@ -13,7 +13,7 @@ def mountGoogleDrive(myFolder):
     else:
         raise Exception('\nCannot mount the Google Drive\n')
 
-myFolder = '/ICLR 2026/'
+myFolder = '/'
 curr_path = mountGoogleDrive(myFolder)
 
 import math
